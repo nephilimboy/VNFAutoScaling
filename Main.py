@@ -93,7 +93,7 @@ class FileReader:
     def readNumberOfLines(self, numberOfLines):
         with open(self.filePath) as file:
             head = list(islice(file, numberOfLines))
-        # example -> "['hadi baka\n']"
+        # example -> "['Line1\n']"
         # To remove "\n" from the string
         finalArray = []
         for string in head:
@@ -103,7 +103,7 @@ class FileReader:
 
 
 if __name__ == "__main__":
-
+    pass
     # client = docker.DockerClient(base_url=DockerApiUrlPort)
     # dockerUtils = DockerUtil(client)
 
@@ -111,8 +111,8 @@ if __name__ == "__main__":
     # dockerUtils.createContainer("bvnf5", "amir", 1000000000)
 
 
-    reader = FileReader("/Users/amir/Desktop/baka")
-    print(reader.readNumberOfLines(89))
+    # reader = FileReader("/Users/amir/Desktop/baka")
+    # print(reader.readNumberOfLines(89))
 
 
 
