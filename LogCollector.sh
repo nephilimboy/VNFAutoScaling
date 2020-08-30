@@ -7,6 +7,7 @@
 # Modify these parameters before running
 DIR=/home/amir/container_autoLog/
 ContainerNamePrefix=app
+ContainerHistoryNamePrefix=history_
 
 # Clean The Log Folder
 rm -rf $DIR*
@@ -31,8 +32,13 @@ do
                 isContainerExist=true
             fi
         done
-        if [ "$isContainerExist" == false ] ; then
-            rm -rf $DIR$fileName
+        # Stop removing history files
+        if [[ $fileName == *"history"* ]] ; then
+            true
+        else
+            if [ "$isContainerExist" == false ] ; then
+                rm -rf $DIR$fileName
+            fi
         fi
     done
 
