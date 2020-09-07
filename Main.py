@@ -1,17 +1,20 @@
 import json
 import logging
+import os
 import time
 from itertools import islice
-import os
 
 # LOGGING CONFIGURATION
 import docker
 
 logging.basicConfig(format='%(asctime)s - %(message)s', datefmt='%d-%b-%y %H:%M:%S')
+logging.getLogger().setLevel(logging.INFO)
 
 #  CONST VARIABLES (make sure to Modify them before using this script)
+ServerIpAddress = "192.168.1.5"
 DockerApiUrlPort = "tcp://192.168.1.5:2375"
-WebServersLogsFolderPath = "/Users/amir/Desktop"
+WebServersLogsFolderPath = "/home/amir/containerAutoScalingScripts/logs"
+HaProxyConfigFilePath = "/etc/haproxy/haproxy.cfg"
 
 
 class DockerUtil:
@@ -104,19 +107,19 @@ class FileReader:
         return finalArray
 
 
-
 class HaproxyConfigModifier:
     def __init__(self, filePath):
         self.filePath = filePath
 
     def addNewDestination(self, destinationString):
         with open(self.filePath, "a") as myfile:
-            # myfile.write("    appended text\n")
+            # Destination string needs to have 4 spaces at the beginning, like below
+            #    server web1.example.com  192.168.1.101:80
             myfile.write(destinationString)
 
     def removeTheNewestDestination(self):
         # Based on the answer from https://stackoverflow.com/questions/1877999/delete-final-line-in-file-with-python
-        with open(self.filePath, "r+", encoding = "utf-8") as file:
+        with open(self.filePath, "r+") as file:
             file.seek(0, os.SEEK_END)
             pos = file.tell() - 1
             while pos > 0 and file.read(1) != "\n":
@@ -126,56 +129,104 @@ class HaproxyConfigModifier:
                 file.seek(pos, os.SEEK_SET)
                 file.truncate()
 
+
+class OsCommandRunner:
+    def executeCommand(self, command):
+        com = os.popen(command)
+        logging.info("----------- Executing Command: " + command + " -----------")
+        logging.info(com.read())
+        logging.info(com.close())
+        logging.info("----------------------------------------------------------")
+
+
 if __name__ == "__main__":
     newlyWebServerList = {}
     initialScenarioContainerList = {}
     numberOfWebServers = 1  # There is already 1 web server for initial scenario
 
+    # Objects
     # client = docker.DockerClient(base_url=DockerApiUrlPort)
     # dockerUtils = DockerUtil(client)
+    osCommandRunner = OsCommandRunner()
+    haproxyConfigModifier = HaproxyConfigModifier(HaProxyConfigFilePath)
     # -----------------------------------------------------------------------
-    # # Create Initial Scenario
-    # # Create Sender Httperf
-    # senderContainer = dockerUtils.createContainer("bvnf5", "sender", 1000000000, command="tail -f /dev/null", ports={
-    #     # Container Port : Host Port
-    #     '80': 8000
-    # })
-    # # Create web server
-    # webServerContainre = dockerUtils.createContainer("httpd_final", "app" + str(numberOfWebServers), 1000000000,
-    #                                                  command='', ports={
-    #         # Container Port : Host Port
-    #         '80': 8010 + numberOfWebServers
-    #     })
-    #
-    # if senderContainer.id:
-    #     initialScenarioContainerList["sender"] = senderContainer.id
-    # if webServerContainre.id:
-    #     initialScenarioContainerList["app1"] = webServerContainre.id
-    #
-    # if initialScenarioContainerList.get("sender") and initialScenarioContainerList.get("app1"):
-    #     logging.info("Initial scenario is deployed")
-    # else:
-    #     logging.error("Could not create initial scenario")
-    # # -----------------------------------------------------------------------
-    # forceToCreate = True
-    # # Main Loop
-    # while True:
-    #     time.sleep(10)
-    #     if numberOfWebServers > 1 and not forceToCreate:
-    #         dockerUtils.removeCountainer("app" + str(counterOfWebServers))
-    #         counterOfWebServers = counterOfWebServers - 1
-    #     else:
-    #         webServerContainre = dockerUtils.createContainer("httpd_final", "app" + str(numberOfWebServers), 1000000000,
-    #                                                          command='', ports={
-    #                 # Container Port : Host Port
-    #                 '80': 8010 + numberOfWebServers
-    #             })
-    #         numberOfWebServers = numberOfWebServers + 1
-    #
-    #     if numberOfWebServers == 5:
-    #         forceToCreate = False
-    #     if numberOfWebServers == 1:
-    #         forceToCreate = True
+    # Create Initial Scenario
+    # Create Sender Httperf
+    # 100000000 -> ~~ 100 Meg (Need to be converted to 1024)
+    senderContainer = dockerUtils.createContainer("bvnf5", "sender", 1000000000, command="tail -f /dev/null", ports={
+        # Container Port : Host Port
+        '80': 8000
+    })
+    # Create web server
+    webServerContainre = dockerUtils.createContainer("httpd_final", "app" + str(numberOfWebServers), 1000000000,
+                                                     command='', ports={
+            # Container Port : Host Port
+            '80': 8010 + numberOfWebServers
+        })
+
+    if senderContainer.id:
+        initialScenarioContainerList["sender"] = senderContainer.id
+    if webServerContainre.id:
+        initialScenarioContainerList["app1"] = webServerContainre.id
+
+    if initialScenarioContainerList.get("sender") and initialScenarioContainerList.get("app1"):
+        logging.info("Initial scenario is deployed")
+    else:
+        logging.error("Could not create initial scenario")
+    # -----------------------------------------------------------------------
+    forceToCreate = True
+    # Main Loop
+    logging.info(" ")
+    logging.info("**** STARTING THE MAIN LOOP ****")
+    logging.info(" ")
+    while True:
+        time.sleep(5)
+        print(
+            "########################################################################################################################")
+        print(
+            "########################################################################################################################")
+        if numberOfWebServers > 1 and not forceToCreate:
+            dockerUtils.removeCountainer("app" + str(numberOfWebServers))
+            logging.info("Web Server " + ("app" + str(numberOfWebServers)) + " has been removed")
+            numberOfWebServers = numberOfWebServers - 1
+            logging.info("Modify and Restart HaProxy")
+            # Edit the haProxy config file and remove the destination
+            haproxyConfigModifier.removeTheNewestDestination()
+            # Prevent the removal of "\n" at the end of the config file
+            haproxyConfigModifier.addNewDestination("\n")
+            # Restarting the HaProxy service
+            osCommandRunner.executeCommand("service haproxy restart")
+            time.sleep(2)
+            osCommandRunner.executeCommand("service haproxy status | grep Active")
+
+
+        else:
+            numberOfWebServers = numberOfWebServers + 1
+            webServerContainre = dockerUtils.createContainer("httpd_final", "app" + str(numberOfWebServers), 1000000000,
+                                                             command='', ports={
+                    # Container Port : Host Port
+                    '80': 8010 + numberOfWebServers
+                })
+            logging.info("Web Server " + ("app" + str(numberOfWebServers)) + " has been added")
+            logging.info("Modify and Restart HaProxy")
+            # Edit the haProxy config file and add the destination
+            # Destination string needs to have 4 spaces at the beginning, like below
+            #    server web1.example.com  192.168.1.101:80
+            haproxyConfigModifier.addNewDestination(
+                "    server " + ("app" + str(numberOfWebServers)) + "  " + ServerIpAddress + ':' + str(
+                    8010 + numberOfWebServers) + "\n")
+            # Restarting the HaProxy service
+            osCommandRunner.executeCommand("service haproxy restart")
+            time.sleep(2)
+            osCommandRunner.executeCommand("service haproxy status | grep Active")
+
+        if numberOfWebServers == 3:
+            forceToCreate = False
+        if numberOfWebServers == 1:
+            forceToCreate = True
+
+
+
 
 
     # mainWebServerLogReader = FileReader("/Users/amir/Desktop/baka")
@@ -184,16 +235,3 @@ if __name__ == "__main__":
     # for data in mainWebServerLogReader.readNumberOfLines(6):
     #     temp[(data.split())[0]] = ((data.split())[1]).replace("%", "")
     # print(temp)
-
-    # client = docker.DockerClient(base_url=DockerApiUrlPort)
-    # dockerUtils = DockerUtil(client)
-
-    # 100000000 -> ~~ 100 Meg (Need to be converted to 1024)
-    # dockerUtils.createContainer("bvnf5", "amir", 1000000000)
-
-    # reader = FileReader("/Users/amir/Desktop/baka")
-    # print(reader.readNumberOfLines(89))
-
-
-
-
