@@ -145,8 +145,8 @@ if __name__ == "__main__":
     numberOfWebServers = 1  # There is already 1 web server for initial scenario
 
     # Objects
-    # client = docker.DockerClient(base_url=DockerApiUrlPort)
-    # dockerUtils = DockerUtil(client)
+    client = docker.DockerClient(base_url=DockerApiUrlPort)
+    dockerUtils = DockerUtil(client)
     osCommandRunner = OsCommandRunner()
     haproxyConfigModifier = HaproxyConfigModifier(HaProxyConfigFilePath)
     # -----------------------------------------------------------------------
@@ -180,7 +180,7 @@ if __name__ == "__main__":
     logging.info("**** STARTING THE MAIN LOOP ****")
     logging.info(" ")
     while True:
-        time.sleep(5)
+        time.sleep(10)
         print(
             "########################################################################################################################")
         print(
