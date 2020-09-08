@@ -3,6 +3,8 @@ import logging
 import os
 import time
 from itertools import islice
+from os import listdir
+from os.path import isfile, join
 
 # LOGGING CONFIGURATION
 import docker
@@ -13,7 +15,7 @@ logging.getLogger().setLevel(logging.INFO)
 #  CONST VARIABLES (make sure to Modify them before using this script)
 ServerIpAddress = "192.168.1.5"
 DockerApiUrlPort = "tcp://192.168.1.5:2375"
-WebServersLogsFolderPath = "/home/amir/containerAutoScalingScripts/logs"
+WebServersLogsFolderPath = "/home/amir/containerAutoScalingScripts/logs/"
 HaProxyConfigFilePath = "/etc/haproxy/haproxy.cfg"
 
 
@@ -139,7 +141,66 @@ class OsCommandRunner:
         logging.info("----------------------------------------------------------")
 
 
+class WebServer:
+    def __init__(self, cpu, memory, memoryUsage, inputTraffic, outPutTraffic, busyThreadsCount):
+        self.cpu = cpu
+        self.memory = memory
+        self.memoryUsage = memoryUsage
+        self.inputTraffic = inputTraffic
+        self.outPutTraffic = outPutTraffic
+        self.busyThreadsCount = busyThreadsCount
+
+
+# Output :  sorted list of ['app2', 'app5', 'app3', 'app1', 'app4'] -> ['app1', 'app2', 'app3', 'app4', 'app5']
+def getLogsFilesName(logFilesPath):
+    files = [f for f in listdir(logFilesPath) if isfile(join(logFilesPath, f))]
+    temp = []
+    for name in files:
+        if name.startswith('app'):
+            temp.append(name)
+    return sorted(temp)
+
+
+def getCpuTriggerCondition():
+    # CPU% TriggerCondition for [WebServer1, WebServer2, WebServer3, WebServer4, ... , WebServerN]
+    # If the number of WebServers list is grater than the TriggerCondition list, the last TriggerCondition will be applied to extra WebServers
+    # If the number of WebServers list is less than the TriggerCondition list, Nothing would happens :D
+    return [50, 50, 20]
+
+
+def getMemoryUsageTriggerCondition():
+    # MemoryUsage% TriggerCondition for [WebServer1, WebServer2, WebServer3, WebServer4, ... , WebServerN]
+    # If the number of WebServers list is grater than the TriggerCondition list, the last TriggerCondition will be applied to extra WebServers
+    # If the number of WebServers list is less than the TriggerCondition list, Nothing would happens :D
+    return [10, 70, 20]
+
+
+def getInputTrafficTriggerCondition():
+    # InputTraffic KB TriggerCondition for [WebServer1, WebServer2, WebServer3, WebServer4, ... , WebServerN]
+    # If the number of WebServers list is grater than the TriggerCondition list, the last TriggerCondition will be applied to extra WebServers
+    # If the number of WebServers list is less than the TriggerCondition list, Nothing would happens :D
+    return [30, 40, 20]
+
+
+def getOutPutTrafficTriggerCondition():
+    # OutPutTraffic KB TriggerCondition for [WebServer1, WebServer2, WebServer3, WebServer4, ... , WebServerN]
+    # If the number of WebServers list is grater than the TriggerCondition list, the last TriggerCondition will be applied to extra WebServers
+    # If the number of WebServers list is less than the TriggerCondition list, Nothing would happens :D
+    return [10, 10, 20]
+
+
+def getBusyThreadsCountTriggerCondition():
+    # BusyThreadsCount TriggerCondition for [WebServer1, WebServer2, WebServer3, WebServer4, ... , WebServerN]
+    # If the number of WebServers list is grater than the TriggerCondition list, the last TriggerCondition will be applied to extra WebServers
+    # If the number of WebServers list is less than the TriggerCondition list, Nothing would happens :D
+    return [10, 10, 10]
+
+def chekTriggerConditionToReadStatus(numberOfWebServers, triggerConditionArray, readStatus):
+    pass
+
+
 if __name__ == "__main__":
+
     newlyWebServerList = {}
     initialScenarioContainerList = {}
     numberOfWebServers = 1  # There is already 1 web server for initial scenario
@@ -149,7 +210,8 @@ if __name__ == "__main__":
     dockerUtils = DockerUtil(client)
     osCommandRunner = OsCommandRunner()
     haproxyConfigModifier = HaproxyConfigModifier(HaProxyConfigFilePath)
-    # -----------------------------------------------------------------------
+    # ----------------------------------------------------------------------------------------------------------------
+    # ----------------------------------------------------------------------------------------------------------------
     # Create Initial Scenario
     # Create Sender Httperf
     # 100000000 -> ~~ 100 Meg (Need to be converted to 1024)
@@ -173,13 +235,43 @@ if __name__ == "__main__":
         logging.info("Initial scenario is deployed")
     else:
         logging.error("Could not create initial scenario")
-    # -----------------------------------------------------------------------
+    # ----------------------------------------------------------------------------------------------------------------
+    # ----------------------------------------------------------------------------------------------------------------
+
     forceToCreate = True
     # Main Loop
     logging.info(" ")
     logging.info("**** STARTING THE MAIN LOOP ****")
     logging.info(" ")
     while True:
+        # Trigger condition checker for scale condition, OutPut: [y, n, n, y, n ...] for WebServers
+        cpuTriggerConditionChecker = []
+        memoryUSageTriggerConditionChecker = []
+        inputTrafficTriggerConditionChecker = []
+        outPutTrafficTriggerConditionChecker = []
+        busyThreadsCountTriggerConditionChecker = []
+
+        # Array of running web servers object
+        webServers = []
+        # Read the log files and create the  webServer object
+        for logFile in getLogsFilesName(WebServersLogsFolderPath):
+            fileReader = FileReader(WebServersLogsFolderPath + logFile)
+            temp = []
+            # {'Cpu': '0.01', 'Memory': '12.58MiB', 'MemoryUsage': '0.21', 'InputTraffic': '1.82kB', 'OutPutTraffic': '9.1kB', 'BusyThreadsCount': '1'}
+            for data in fileReader.readNumberOfLines(6):
+                temp.append(((data.split())[1]).replace("%", ""))
+            # compare the read status with trigger condition array
+
+
+
+
+            if len(temp) == 6:
+                webServers.append(
+                    WebServer(cpu=temp[0], memory=temp[1], memoryUsage=temp[2], inputTraffic=temp[3],
+                              outPutTraffic=temp[4], busyThreadsCount=temp[5]))
+            else:
+                logging.error("Web server " + logFile + " status is not correct")
+
         time.sleep(10)
         print(
             "########################################################################################################################")
@@ -224,10 +316,6 @@ if __name__ == "__main__":
             forceToCreate = False
         if numberOfWebServers == 1:
             forceToCreate = True
-
-
-
-
 
     # mainWebServerLogReader = FileReader("/Users/amir/Desktop/baka")
     # temp = {}
