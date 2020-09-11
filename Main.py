@@ -99,14 +99,17 @@ class FileReader:
 
     # Output: Array of lines ['Line1', 'Line2', 'Line3', 'Line4', 'Line5']
     def readNumberOfLines(self, numberOfLines):
-        with open(self.filePath) as file:
-            head = list(islice(file, numberOfLines))
-        # example -> "['Line1\n']"
-        # To remove "\n" from the string
-        finalArray = []
-        for string in head:
-            finalArray.append(string.replace('\n', ''))
-        return finalArray
+        if os.path.exists(self.filePath):
+            with open(self.filePath) as file:
+                head = list(islice(file, numberOfLines))
+            # example -> "['Line1\n']"
+            # To remove "\n" from the string
+            finalArray = []
+            for string in head:
+                finalArray.append(string.replace('\n', ''))
+            return finalArray
+        else:
+            return []
 
 
 class HaproxyConfigModifier:
@@ -154,6 +157,7 @@ class WebServer:
 # Output :  sorted list of ['app2', 'app5', 'app3', 'app1', 'app4'] -> ['app1', 'app2', 'app3', 'app4', 'app5']
 def getLogsFilesName(logFilesPath):
     files = [f for f in listdir(logFilesPath) if isfile(join(logFilesPath, f))]
+    time.sleep(1)
     temp = []
     for name in files:
         if name.startswith('app'):
@@ -195,8 +199,21 @@ def getBusyThreadsCountTriggerCondition():
     # If the number of WebServers list is less than the TriggerCondition list, Nothing would happens :D
     return [10, 10, 10]
 
+
 def chekTriggerConditionToReadStatus(numberOfWebServers, triggerConditionArray, readStatus):
     pass
+
+def checkMajority(arrayToCheck, numberofWebServers):
+    majority = numberofWebServers / 2
+    numberOfHint = 0
+    for item in arrayToCheck:
+        if item == "1":
+            numberOfHint += 1
+
+    if numberOfHint > majority:
+        return True
+    else:
+        return False
 
 
 if __name__ == "__main__":
@@ -215,7 +232,7 @@ if __name__ == "__main__":
     # Create Initial Scenario
     # Create Sender Httperf
     # 100000000 -> ~~ 100 Meg (Need to be converted to 1024)
-    senderContainer = dockerUtils.createContainer("bvnf5", "sender", 1000000000, command="tail -f /dev/null", ports={
+    senderContainer = dockerUtils.createContainer("bvnf6", "sender", 1000000000, command="tail -f /dev/null", ports={
         # Container Port : Host Port
         '80': 8000
     })
@@ -253,31 +270,38 @@ if __name__ == "__main__":
 
         # Array of running web servers object
         webServers = []
+        # shouldScale = False
+
         # Read the log files and create the  webServer object
-        for logFile in getLogsFilesName(WebServersLogsFolderPath):
-            fileReader = FileReader(WebServersLogsFolderPath + logFile)
-            temp = []
-            # {'Cpu': '0.01', 'Memory': '12.58MiB', 'MemoryUsage': '0.21', 'InputTraffic': '1.82kB', 'OutPutTraffic': '9.1kB', 'BusyThreadsCount': '1'}
-            for data in fileReader.readNumberOfLines(6):
-                temp.append(((data.split())[1]).replace("%", ""))
-            # compare the read status with trigger condition array
+        # for logFile in getLogsFilesName(WebServersLogsFolderPath):
+        time.sleep(1)
+        readAllContainerStats = False
+        while not readAllContainerStats:
+            arrayOfAllContainerThresholdHintStats = []
+            for logFile in range(numberOfWebServers):
+                fileReader = FileReader(WebServersLogsFolderPath + "app" + str(logFile + 1))
+                temp = []
+                # {'Cpu': '0.01', 'Memory': '12.58MiB', 'MemoryUsage': '0.21', 'InputTraffic': '1.82kB', 'OutPutTraffic': '9.1kB', 'BusyThreadsCount': '1'}
+                stats = fileReader.readNumberOfLines(6)
+                for data in stats:
+                    temp.append(((data.split())[1]).replace("%", ""))
+                # compare the read status with trigger condition array
+                if len(temp) > 4:
+                    if float(temp[0]) > 20:
+                        arrayOfAllContainerThresholdHintStats.append("1")
+                    elif float(temp[0]) < 15:
+                        arrayOfAllContainerThresholdHintStats.append("0")
+                if len(arrayOfAllContainerThresholdHintStats) == numberOfWebServers:
+                    readAllContainerStats = True
+                else:
+                    readAllContainerStats = False
 
 
-
-
-            if len(temp) == 6:
-                webServers.append(
-                    WebServer(cpu=temp[0], memory=temp[1], memoryUsage=temp[2], inputTraffic=temp[3],
-                              outPutTraffic=temp[4], busyThreadsCount=temp[5]))
-            else:
-                logging.error("Web server " + logFile + " status is not correct")
-
-        time.sleep(10)
-        print(
-            "########################################################################################################################")
-        print(
-            "########################################################################################################################")
-        if numberOfWebServers > 1 and not forceToCreate:
+        if not checkMajority(arrayOfAllContainerThresholdHintStats, numberOfWebServers) and numberOfWebServers > 1:
+            print(
+                "########################################################################################################################")
+            print(
+                "########################################################################################################################")
             dockerUtils.removeCountainer("app" + str(numberOfWebServers))
             logging.info("Web Server " + ("app" + str(numberOfWebServers)) + " has been removed")
             numberOfWebServers = numberOfWebServers - 1
@@ -292,7 +316,7 @@ if __name__ == "__main__":
             osCommandRunner.executeCommand("service haproxy status | grep Active")
 
 
-        else:
+        elif checkMajority(arrayOfAllContainerThresholdHintStats, numberOfWebServers):
             numberOfWebServers = numberOfWebServers + 1
             webServerContainre = dockerUtils.createContainer("httpd_final", "app" + str(numberOfWebServers), 1000000000,
                                                              command='', ports={
@@ -312,10 +336,6 @@ if __name__ == "__main__":
             time.sleep(2)
             osCommandRunner.executeCommand("service haproxy status | grep Active")
 
-        if numberOfWebServers == 3:
-            forceToCreate = False
-        if numberOfWebServers == 1:
-            forceToCreate = True
 
     # mainWebServerLogReader = FileReader("/Users/amir/Desktop/baka")
     # temp = {}
@@ -323,3 +343,13 @@ if __name__ == "__main__":
     # for data in mainWebServerLogReader.readNumberOfLines(6):
     #     temp[(data.split())[0]] = ((data.split())[1]).replace("%", "")
     # print(temp)
+
+
+
+
+# if len(temp) == 6:
+#     webServers.append(
+#         WebServer(cpu=temp[0], memory=temp[1], memoryUsage=temp[2], inputTraffic=temp[3],
+#                   outPutTraffic=temp[4], busyThreadsCount=temp[5]))
+# else:
+#     logging.error("Web server " + logFile + " status is not correct")

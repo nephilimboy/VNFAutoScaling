@@ -5,12 +5,12 @@
 
 
 # Modify these parameters before running
-DIR=/home/amir/container_autoLog/
+DIR=/home/amir/containerAutoScalingScripts/logs/
 ContainerNamePrefix=app
 ContainerHistoryNamePrefix=history_
 
 # Clean The Log Folder
-rm -rf $DIR*
+#rm -rf $DIR*
 
 # Main Loop
 while :
@@ -32,7 +32,6 @@ do
                 isContainerExist=true
             fi
         done
-        # Stop removing history files
         if [[ $fileName == *"history"* ]] ; then
             true
         else
@@ -98,6 +97,7 @@ do
     done
 	#sleep 1
 done
+
 
 
 
