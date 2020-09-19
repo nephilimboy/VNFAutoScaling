@@ -71,7 +71,12 @@ do
                 #   1    7   no       0     yes       0    25   0       0          0
                 #   2    8   no       0     yes       0    25   0       0          0
                 #   Sum  3   0        0               1    74   0       0          0
-            busyThreadsCount=$(lynx --dump http://$containerIP/server-status | grep Sum |  head -1 | awk '{print $5}')
+            #busyThreadsCount=$(lynx --dump http://$containerIP/server-status | grep Sum |  head -1 | awk '{print $5}')
+            temp=$(lynx --dump http://$containerIP/server-status)
+            busyThreadsCount=$(echo "$temp" | grep Sum |  head -1 | awk '{print $5}')
+            processingReqTime=$(echo "$temp" | grep -A 2 "Protocol" |tail -n +3 | awk '{print $8}')
+
+
 
             # Saving extracted data to files (current data file with ">" command & history available file with ">>" command)
             # Creating current log file
@@ -81,6 +86,7 @@ do
             echo "InputTraffic $inputTraffic" >> $DIR$container
             echo "OutPutTraffic $outputTraffic" >> $DIR$container
             echo "BusyThreadsCount $busyThreadsCount" >> $DIR$container
+            echo "ProcessingReqTime $processingReqTime" >> $DIR$container
 
             # Creating history log file (will be used for presenting data and graphing)
             historyFileName=history_$container
@@ -92,6 +98,7 @@ do
             echo "InputTraffic $inputTraffic" >> $DIR$historyFileName
             echo "OutPutTraffic $outputTraffic" >> $DIR$historyFileName
             echo "BusyThreadsCount $busyThreadsCount" >> $DIR$historyFileName
+            echo "ProcessingReqTime $processingReqTime" >> $DIR$container
 
         fi
     done
