@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import os
 import time
 from itertools import islice
@@ -16,7 +17,67 @@ logging.getLogger().setLevel(logging.INFO)
 ServerIpAddress = "192.168.1.5"
 DockerApiUrlPort = "tcp://192.168.1.5:2375"
 WebServersLogsFolderPath = "/home/amir/containerAutoScalingScripts/logs/"
+ScaleUpThreshold = 50
+ScaleDownThreshold = 30
+ScaleUpAverageThreshold = 10
+Coefficient_X = 2
+Coefficient_Y = 1
+Coefficient_Z = 1
 HaProxyConfigFilePath = "/etc/haproxy/haproxy.cfg"
+HaProxyInitConfigFile = """
+global
+	log /dev/log	local0
+	log /dev/log	local1 notice
+	chroot /var/lib/haproxy
+	stats socket /run/haproxy/admin.sock mode 660 level admin expose-fd listeners
+	stats timeout 30s
+	user haproxy
+	group haproxy
+	daemon
+
+	# Default SSL material locations
+	ca-base /etc/ssl/certs
+	crt-base /etc/ssl/private
+
+	# Default ciphers to use on SSL-enabled listening sockets.
+	# For more information, see ciphers(1SSL). This list is from:
+	#  https://hynek.me/articles/hardening-your-web-servers-ssl-ciphers/
+	# An alternative list with additional directives can be obtained from
+	#  https://mozilla.github.io/server-side-tls/ssl-config-generator/?server=haproxy
+	ssl-default-bind-ciphers ECDH+AESGCM:DH+AESGCM:ECDH+AES256:DH+AES256:ECDH+AES128:DH+AES:RSA+AESGCM:RSA+AES:!aNULL:!MD5:!DSS
+	ssl-default-bind-options no-sslv3
+
+defaults
+	log	global
+	mode	http
+	option	httplog
+	option	dontlognull
+        timeout connect 5000
+        timeout client  50000
+        timeout server  50000
+	errorfile 400 /etc/haproxy/errors/400.http
+	errorfile 403 /etc/haproxy/errors/403.http
+	errorfile 408 /etc/haproxy/errors/408.http
+	errorfile 500 /etc/haproxy/errors/500.http
+	errorfile 502 /etc/haproxy/errors/502.http
+	errorfile 503 /etc/haproxy/errors/503.http
+	errorfile 504 /etc/haproxy/errors/504.http
+
+frontend Local_Server
+    bind 192.168.1.5:80
+    mode http
+    default_backend My_Web_Servers
+
+backend My_Web_Servers
+    mode http
+    balance roundrobin
+    option forwardfor
+    http-request set-header X-Forwarded-Port %[dst_port]
+    http-request add-header X-Forwarded-Proto https if { ssl_fc }
+    option httpchk HEAD / HTTP/1.1rnHost:localhost
+    #server web1.example.com  192.168.1.101:80
+    #server web2.example.com  192.168.1.102:80
+"""
 
 
 class DockerUtil:
@@ -134,6 +195,13 @@ class HaproxyConfigModifier:
                 file.seek(pos, os.SEEK_SET)
                 file.truncate()
 
+    def reWriteWholeConfigFile(self, configStr):
+        # Remove all texts (clean the file)
+        with open(self.filePath, 'w'): pass
+
+        with open(self.filePath, 'w+') as fh:
+            fh.write(configStr)
+
 
 class OsCommandRunner:
     def executeCommand(self, command):
@@ -145,63 +213,90 @@ class OsCommandRunner:
 
 
 class WebServer:
-    def __init__(self, cpu, memory, memoryUsage, inputTraffic, outPutTraffic, busyThreadsCount):
+    def __init__(self, name, mappedPort, weight):
+        self.name = name
+        self.weight = weight
+        self.mappedPort = mappedPort
+        self.cpu = -1
+        self.memory = -1
+        self.memoryUsage = -1
+        self.inputTraffic = -1
+        self.outPutTraffic = -1
+        self.busyThreadsCount = -1
+        self.processingReqTime = -1
+        self.score = 0
+        self.scaleUpFlag = False
+        self.scaleDownFlag = False
+
+        # Situations:
+        # deathFlag = false  isDead = false --> webServer is alive and active (as a active destination in LB config)
+        # deathFlag = true  isDead = false --> webServer is alive but NOT active (removed from LB config)
+        # deathFlag = true  isDead = true --> webServer is dead and NOT active (removed physically)
+        self.deathFlag = False
+        self.isDead = False
+
+    def setStatus(self, cpu, memory, memoryUsage, inputTraffic, outPutTraffic, busyThreadsCount, processingReqTime):
         self.cpu = cpu
         self.memory = memory
         self.memoryUsage = memoryUsage
         self.inputTraffic = inputTraffic
         self.outPutTraffic = outPutTraffic
         self.busyThreadsCount = busyThreadsCount
+        self.processingReqTime = processingReqTime
+
+    def isStatusSet(self):
+        if (self.cpu > -1 and self.memory > -1 and self.memoryUsage > -1 and self.inputTraffic > -1 and
+                self.outPutTraffic > -1 and self.busyThreadsCount > -1 and self.processingReqTime > -1):
+            return True
+        return False
+
+    def calcucateScoreAndFlags(self, X, Y, Z, maxProcessingTime, scaleUpThr, scaleDownThr):
+        self.score = X * ((self.memoryUsage + self.cpu) / 2) + Y * (self.busyThreadsCount / 4) + Z * (
+                self.processingReqTime / maxProcessingTime)
+        if self.score > scaleUpThr:
+            self.scaleUpFlag = True
+            self.scaleDownFlag = False
+        elif self.score < scaleDownThr:
+            self.scaleUpFlag = False
+            self.scaleDownFlag = True
+        else:
+            self.scaleUpFlag = False
+            self.scaleDownFlag = False
+        return self.score
+
+    def setWeight(self, weight):
+        self.weight = weight
+
+    def getWeight(self):
+        return self.weight
+
+    def getScaleUpFlag(self):
+        return self.scaleUpFlag
+
+    def getScaleDownFlag(self):
+        return self.scaleDownFlag
+
+    def setDeathFlag(self, flag):
+        self.deathFlag = flag
+
+    def getDeathFlag(self):
+        return self.scaleDownFlag
+
+    def setIsDead(self, flag):
+        self.isDead = flag
+
+    def getIsDead(self):
+        return self.isDead
 
 
-# Output :  sorted list of ['app2', 'app5', 'app3', 'app1', 'app4'] -> ['app1', 'app2', 'app3', 'app4', 'app5']
-def getLogsFilesName(logFilesPath):
-    files = [f for f in listdir(logFilesPath) if isfile(join(logFilesPath, f))]
-    time.sleep(1)
-    temp = []
-    for name in files:
-        if name.startswith('app'):
-            temp.append(name)
-    return sorted(temp)
+def createConfigFileBasedOnAliveCountainer(webServerObjArray, haproxyInitConfigFileTxt):
+    tempStr = ''
+    for webServer in webServerObjArray:
+        if not webServer.getDeathFlag():
+            tempStr += "    server " + webServer.name + "  " + ServerIpAddress + ':' + str(
+                webServer.mappedPort) + " weight " + math.ceil(webServer.weight) + "\n"
+    return haproxyInitConfigFileTxt + tempStr
 
-
-def getCpuTriggerCondition():
-    # CPU% TriggerCondition for [WebServer1, WebServer2, WebServer3, WebServer4, ... , WebServerN]
-    # If the number of WebServers list is grater than the TriggerCondition list, the last TriggerCondition will be applied to extra WebServers
-    # If the number of WebServers list is less than the TriggerCondition list, Nothing would happens :D
-    return [50, 50, 20]
-
-
-def getMemoryUsageTriggerCondition():
-    # MemoryUsage% TriggerCondition for [WebServer1, WebServer2, WebServer3, WebServer4, ... , WebServerN]
-    # If the number of WebServers list is grater than the TriggerCondition list, the last TriggerCondition will be applied to extra WebServers
-    # If the number of WebServers list is less than the TriggerCondition list, Nothing would happens :D
-    return [10, 70, 20]
-
-
-def getInputTrafficTriggerCondition():
-    # InputTraffic KB TriggerCondition for [WebServer1, WebServer2, WebServer3, WebServer4, ... , WebServerN]
-    # If the number of WebServers list is grater than the TriggerCondition list, the last TriggerCondition will be applied to extra WebServers
-    # If the number of WebServers list is less than the TriggerCondition list, Nothing would happens :D
-    return [30, 40, 20]
-
-
-def getOutPutTrafficTriggerCondition():
-    # OutPutTraffic KB TriggerCondition for [WebServer1, WebServer2, WebServer3, WebServer4, ... , WebServerN]
-    # If the number of WebServers list is grater than the TriggerCondition list, the last TriggerCondition will be applied to extra WebServers
-    # If the number of WebServers list is less than the TriggerCondition list, Nothing would happens :D
-    return [10, 10, 20]
-
-
-def getBusyThreadsCountTriggerCondition():
-    # BusyThreadsCount TriggerCondition for [WebServer1, WebServer2, WebServer3, WebServer4, ... , WebServerN]
-    # If the number of WebServers list is grater than the TriggerCondition list, the last TriggerCondition will be applied to extra WebServers
-    # If the number of WebServers list is less than the TriggerCondition list, Nothing would happens :D
-    return [10, 10, 10]
-
-
-def chekTriggerConditionToReadStatus(numberOfWebServers, triggerConditionArray, readStatus):
-    pass
 
 def checkMajority(arrayToCheck, numberofWebServers):
     majority = numberofWebServers / 2
@@ -220,8 +315,8 @@ if __name__ == "__main__":
 
     newlyWebServerList = {}
     initialScenarioContainerList = {}
-    numberOfWebServers = 1  # There is already 1 web server for initial scenario
-
+    # numberOfWebServers = 1  # There is already 1 web server for initial scenario
+    AllWebServersOBJ = []
     # Objects
     client = docker.DockerClient(base_url=DockerApiUrlPort)
     dockerUtils = DockerUtil(client)
@@ -237,11 +332,13 @@ if __name__ == "__main__":
         '80': 8000
     })
     # Create web server
-    webServerContainre = dockerUtils.createContainer("httpd_final", "app" + str(numberOfWebServers), 1000000000,
+    webServerContainre = dockerUtils.createContainer("httpd_final", "app" + str(1), 1000000000,
                                                      command='', ports={
             # Container Port : Host Port
-            '80': 8010 + numberOfWebServers
+            '80': 8010 + 1
         })
+
+    AllWebServersOBJ.append(WebServer("app1", 8010 + 1, 1))
 
     if senderContainer.id:
         initialScenarioContainerList["sender"] = senderContainer.id
@@ -261,95 +358,105 @@ if __name__ == "__main__":
     logging.info("**** STARTING THE MAIN LOOP ****")
     logging.info(" ")
     while True:
-        # Trigger condition checker for scale condition, OutPut: [y, n, n, y, n ...] for WebServers
-        cpuTriggerConditionChecker = []
-        memoryUSageTriggerConditionChecker = []
-        inputTrafficTriggerConditionChecker = []
-        outPutTrafficTriggerConditionChecker = []
-        busyThreadsCountTriggerConditionChecker = []
+        sumOfAllInvertedScore = 0
+        for webServer in AllWebServersOBJ:
+            readAllStats = False
+            # ******* SECTION 1 *******
+            # Check weather web server is still alive and Loop until all status are available
+            # We still check the web server's status even if it has death flag since in order to remove the
+            # container we need to check the "busy" Thread = 1 after checking this thread, the script sets
+            # the "isDead" flag and removes the container physically at section "#******* SECTION 2 *******#"
+            if not webServer.getIsDead():
+                while not readAllStats:
+                    fileReader = FileReader(WebServersLogsFolderPath + webServer.name)
+                    temp = []
+                    # {'Cpu': '0.01', 'Memory': '12.58MiB', 'MemoryUsage': '0.21', 'InputTraffic': '1.82kB', 'OutPutTraffic': '9.1kB', 'BusyThreadsCount': '1', 'ProcessingReqTime': '200'}
+                    stats = fileReader.readNumberOfLines(7)
+                    for data in stats:
+                        temp.append(((data.split())[1]).replace("%", ""))
+                    if len(temp) == 7:
+                        readAllStats = True
+                        webServer.setStatus(temp[0], temp[1], temp[2], temp[3], temp[4], temp[5], temp[6])
+                        webServer.calcucateScoreAndFlags(Coefficient_X, Coefficient_Y, Coefficient_Z,
+                                                         500, ScaleUpThreshold, ScaleDownThreshold)
+                        # Sum Up all inverted score for calculation the weight of the web server in the next step
+                        sumOfAllInvertedScore += 1 / webServer.score
+        # ******* SECTION 2 *******
+        # Count the "scaleDown/scaleUp" FLAGs from webServer OBJs & Calculate average of all scores
+        # ALSO physical removal of the container happens here ( container death flag = True &
+        # busyThread < 3 (meaning all requests have been processed) )
+        # At section "#******* SECTION 4 *******#" the container will be marked as a "To Be Removed" and
+        # it will be removed from HaProxy config file and score calculation HOWEVER physical removal will happens here
+        numberOfScaleDownFlag = 0
+        numberOfScaleUpFlag = 0
+        numberOfCurrentAliveWebServers = 0
+        sumOfAllScores = 0
+        allWebServersScoreAvg = 0
+        highestWeight = 0
+        lowestScore = 0
+        lowestScoreWebServerName = ''
+        for webServer in AllWebServersOBJ:
+            if not webServer.getDeathFlag():
+                # Set the weight of web server
+                webServer.setWeight(
+                    ((1 / webServer.score) / sumOfAllInvertedScore) * 100
+                )
+                if lowestScore >= webServer.score:
+                    lowestScore = webServer.score
+                    lowestScoreWebServerName = webServer.name
+                if webServer.getWeight() >= highestWeight:
+                    highestWeight = webServer.weight
+                numberOfCurrentAliveWebServers += 1
+                sumOfAllScores += webServer.score
+                if webServer.scaleUpFlag:
+                    numberOfScaleUpFlag += 1
+                elif webServer.scaleDownFlag:
+                    numberOfScaleDownFlag += 1
+            else:
+                # Container physically removal
+                if webServer.busyThreadsCount < 3:
+                    webServer.setIsDead(True)
+                    dockerUtils.removeCountainer(webServer.name)
+                    logging.info("Web Server " + webServer.name + " has been removed")
 
-        # Array of running web servers object
-        webServers = []
-        # shouldScale = False
+        # ******* SECTION 3 *******
+        # Scaling UP
+        if numberOfScaleUpFlag >= numberOfCurrentAliveWebServers / 2 or (
+                sumOfAllScores / numberOfCurrentAliveWebServers) > ScaleUpAverageThreshold:
+            AllWebServersOBJ.append(
+                WebServer(("app" + str(len(AllWebServersOBJ) + 1)), 8010 + len(AllWebServersOBJ) + 1, highestWeight))
 
-        # Read the log files and create the  webServer object
-        # for logFile in getLogsFilesName(WebServersLogsFolderPath):
-        time.sleep(1)
-        readAllContainerStats = False
-        while not readAllContainerStats:
-            arrayOfAllContainerThresholdHintStats = []
-            for logFile in range(numberOfWebServers):
-                fileReader = FileReader(WebServersLogsFolderPath + "app" + str(logFile + 1))
-                temp = []
-                # {'Cpu': '0.01', 'Memory': '12.58MiB', 'MemoryUsage': '0.21', 'InputTraffic': '1.82kB', 'OutPutTraffic': '9.1kB', 'BusyThreadsCount': '1'}
-                stats = fileReader.readNumberOfLines(6)
-                for data in stats:
-                    temp.append(((data.split())[1]).replace("%", ""))
-                # compare the read status with trigger condition array
-                if len(temp) > 4:
-                    if float(temp[0]) > 20:
-                        arrayOfAllContainerThresholdHintStats.append("1")
-                    elif float(temp[0]) < 15:
-                        arrayOfAllContainerThresholdHintStats.append("0")
-                if len(arrayOfAllContainerThresholdHintStats) == numberOfWebServers:
-                    readAllContainerStats = True
-                else:
-                    readAllContainerStats = False
-
-
-        if not checkMajority(arrayOfAllContainerThresholdHintStats, numberOfWebServers) and numberOfWebServers > 1:
-            print(
-                "########################################################################################################################")
-            print(
-                "########################################################################################################################")
-            dockerUtils.removeCountainer("app" + str(numberOfWebServers))
-            logging.info("Web Server " + ("app" + str(numberOfWebServers)) + " has been removed")
-            numberOfWebServers = numberOfWebServers - 1
-            logging.info("Modify and Restart HaProxy")
-            # Edit the haProxy config file and remove the destination
-            haproxyConfigModifier.removeTheNewestDestination()
-            # Prevent the removal of "\n" at the end of the config file
-            haproxyConfigModifier.addNewDestination("\n")
-            # Restarting the HaProxy service
-            osCommandRunner.executeCommand("service haproxy restart")
-            time.sleep(2)
-            osCommandRunner.executeCommand("service haproxy status | grep Active")
-
-
-        elif checkMajority(arrayOfAllContainerThresholdHintStats, numberOfWebServers):
-            numberOfWebServers = numberOfWebServers + 1
-            webServerContainre = dockerUtils.createContainer("httpd_final", "app" + str(numberOfWebServers), 1000000000,
+            webServerContainre = dockerUtils.createContainer("httpd_final", "app" + str(len(AllWebServersOBJ)),
+                                                             1000000000,
                                                              command='', ports={
                     # Container Port : Host Port
-                    '80': 8010 + numberOfWebServers
+                    '80': 8010 + len(AllWebServersOBJ)
                 })
-            logging.info("Web Server " + ("app" + str(numberOfWebServers)) + " has been added")
+            logging.info("Web Server " + ("app" + str(len(AllWebServersOBJ))) + " has been added")
             logging.info("Modify and Restart HaProxy")
+
             # Edit the haProxy config file and add the destination
             # Destination string needs to have 4 spaces at the beginning, like below
-            #    server web1.example.com  192.168.1.101:80
-            haproxyConfigModifier.addNewDestination(
-                "    server " + ("app" + str(numberOfWebServers)) + "  " + ServerIpAddress + ':' + str(
-                    8010 + numberOfWebServers) + "\n")
+            #    server web1.example.com  192.168.1.101:80 weight 10
+            haproxyConfigModifier.reWriteWholeConfigFile(
+                createConfigFileBasedOnAliveCountainer(AllWebServersOBJ, HaProxyInitConfigFile))
+
             # Restarting the HaProxy service
             osCommandRunner.executeCommand("service haproxy restart")
-            time.sleep(2)
+            time.sleep(1)
             osCommandRunner.executeCommand("service haproxy status | grep Active")
 
-
-    # mainWebServerLogReader = FileReader("/Users/amir/Desktop/baka")
-    # temp = {}
-    # # {'Cpu': '0.01', 'Memory': '12.58MiB', 'MemoryUsage': '0.21', 'InputTraffic': '1.82kB', 'OutPutTraffic': '9.1kB', 'BusyThreadsCount': '1'}
-    # for data in mainWebServerLogReader.readNumberOfLines(6):
-    #     temp[(data.split())[0]] = ((data.split())[1]).replace("%", "")
-    # print(temp)
-
-
-
-
-# if len(temp) == 6:
-#     webServers.append(
-#         WebServer(cpu=temp[0], memory=temp[1], memoryUsage=temp[2], inputTraffic=temp[3],
-#                   outPutTraffic=temp[4], busyThreadsCount=temp[5]))
-# else:
-#     logging.error("Web server " + logFile + " status is not correct")
+        # ******* SECTION 4 *******
+        # Scaling Down
+        elif numberOfScaleDownFlag >= numberOfCurrentAliveWebServers / 2:
+            if lowestScoreWebServerName != '':
+                for webserver in AllWebServersOBJ:
+                    if webServer.name == lowestScoreWebServerName:
+                        webServer.setDeathFlag(True)
+                        # Removing the web server from HaProxy config file by setting "setDeathFlag(True)"
+                        haproxyConfigModifier.reWriteWholeConfigFile(
+                            createConfigFileBasedOnAliveCountainer(AllWebServersOBJ, HaProxyInitConfigFile))
+                        # Restarting the HaProxy service
+                        osCommandRunner.executeCommand("service haproxy restart")
+                        time.sleep(1)
+                        osCommandRunner.executeCommand("service haproxy status | grep Active")
