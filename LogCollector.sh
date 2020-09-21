@@ -40,7 +40,7 @@ do
             fi
         fi
     done
-
+    allContainerStats=$(docker stats --no-stream )
     # loop through all containers
 	for container in $containers
     do
@@ -49,7 +49,7 @@ do
             # Out put would be like below
                 #CONTAINER ID        NAME                CPU %               MEM USAGE / LIMIT     MEM %               NET I/O             BLOCK I/O           PIDS
                 #e230251af571        app1                0.01%               14.55MiB / 5.752GiB   0.25%               3.09kB / 10.1kB     7.2MB / 0B          82
-            containerStats=$(docker stats --no-stream | grep $container)
+            containerStats=$(echo "$allContainerStats" | grep $container)
             # Cpu
             cpu=$(echo $containerStats | awk '{print $3}')
             # Memory
@@ -103,6 +103,8 @@ do
         fi
     done
 	#sleep 1
+#	allStatsTogether=allStatsTogether
+#	echo "$allContainerStats" >> $DIR$allStatsTogether
 done
 
 
