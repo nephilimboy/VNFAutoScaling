@@ -17,9 +17,9 @@ logging.getLogger().setLevel(logging.INFO)
 ServerIpAddress = "192.168.1.5"
 DockerApiUrlPort = "tcp://192.168.1.5:2375"
 WebServersLogsFolderPath = "/home/amir/containerAutoScalingScripts/logs/"
-ScaleUpThreshold = 50
-ScaleDownThreshold = 30
-ScaleUpAverageThreshold = 10
+ScaleUpThreshold = 40
+ScaleDownThreshold = 10
+ScaleUpAverageThreshold = 40
 Coefficient_X = 2
 Coefficient_Y = 1
 Coefficient_Z = 1
@@ -280,7 +280,7 @@ class WebServer:
         self.deathFlag = flag
 
     def getDeathFlag(self):
-        return self.scaleDownFlag
+        return self.deathFlag
 
     def setIsDead(self, flag):
         self.isDead = flag
@@ -294,7 +294,7 @@ def createConfigFileBasedOnAliveCountainer(webServerObjArray, haproxyInitConfigF
     for webServer in webServerObjArray:
         if not webServer.getDeathFlag():
             tempStr += "    server " + webServer.name + "  " + ServerIpAddress + ':' + str(
-                webServer.mappedPort) + " weight " + math.ceil(webServer.weight) + "\n"
+                webServer.mappedPort) + " weight " + str(math.ceil(webServer.weight)) + "\n"
     return haproxyInitConfigFileTxt + tempStr
 
 
@@ -339,6 +339,16 @@ if __name__ == "__main__":
         })
 
     AllWebServersOBJ.append(WebServer("app1", 8010 + 1, 1))
+    # Edit the haProxy config file and add the destination
+    # Destination string needs to have 4 spaces at the beginning, like below
+    #    server web1.example.com  192.168.1.101:80 weight 10
+    haproxyConfigModifier.reWriteWholeConfigFile(
+        createConfigFileBasedOnAliveCountainer(AllWebServersOBJ, HaProxyInitConfigFile))
+    time.sleep(2)
+    # Restarting the HaProxy service
+    osCommandRunner.executeCommand("service haproxy restart")
+    time.sleep(1)
+    osCommandRunner.executeCommand("service haproxy status | grep Active")
 
     if senderContainer.id:
         initialScenarioContainerList["sender"] = senderContainer.id
@@ -376,11 +386,21 @@ if __name__ == "__main__":
                         temp.append(((data.split())[1]).replace("%", ""))
                     if len(temp) == 7:
                         readAllStats = True
-                        webServer.setStatus(temp[0], temp[1], temp[2], temp[3], temp[4], temp[5], temp[6])
+                        # cpu, memory, memoryUsage, inputTraffic, outPutTraffic, busyThreadsCount, processingReqTime
+                        webServer.setStatus(float(temp[0]), temp[1], float(temp[2]), temp[3], temp[4], int(temp[5]), int(temp[6]))
                         webServer.calcucateScoreAndFlags(Coefficient_X, Coefficient_Y, Coefficient_Z,
                                                          500, ScaleUpThreshold, ScaleDownThreshold)
                         # Sum Up all inverted score for calculation the weight of the web server in the next step
                         sumOfAllInvertedScore += 1 / webServer.score
+
+                        print("--------------------------")
+                        print(webServer.name + " score is: " + str(webServer.score))
+                        print(temp)
+                        print("sumOfAllInvertedScore  " + str(sumOfAllInvertedScore))
+                        print("--------------------------")
+                        time.sleep(1)
+
+
         # ******* SECTION 2 *******
         # Count the "scaleDown/scaleUp" FLAGs from webServer OBJs & Calculate average of all scores
         # ALSO physical removal of the container happens here ( container death flag = True &
@@ -392,36 +412,54 @@ if __name__ == "__main__":
         numberOfCurrentAliveWebServers = 0
         sumOfAllScores = 0
         allWebServersScoreAvg = 0
-        highestWeight = 0
-        lowestScore = 0
-        lowestScoreWebServerName = ''
+        highestWeight = ((1 / AllWebServersOBJ[0].score) / sumOfAllInvertedScore) * 100
+        lowestScore = AllWebServersOBJ[0].score
+        lowestScoreWebServerName = AllWebServersOBJ[0].name
         for webServer in AllWebServersOBJ:
             if not webServer.getDeathFlag():
                 # Set the weight of web server
                 webServer.setWeight(
                     ((1 / webServer.score) / sumOfAllInvertedScore) * 100
                 )
+                numberOfCurrentAliveWebServers = numberOfCurrentAliveWebServers + 1
+                sumOfAllScores = sumOfAllScores + webServer.score
                 if lowestScore >= webServer.score:
                     lowestScore = webServer.score
                     lowestScoreWebServerName = webServer.name
                 if webServer.getWeight() >= highestWeight:
                     highestWeight = webServer.weight
-                numberOfCurrentAliveWebServers += 1
-                sumOfAllScores += webServer.score
                 if webServer.scaleUpFlag:
-                    numberOfScaleUpFlag += 1
+                    numberOfScaleUpFlag = numberOfScaleUpFlag + 1
                 elif webServer.scaleDownFlag:
-                    numberOfScaleDownFlag += 1
+                    numberOfScaleDownFlag = numberOfScaleDownFlag + 1
             else:
                 # Container physically removal
                 if webServer.busyThreadsCount < 3:
                     webServer.setIsDead(True)
                     dockerUtils.removeCountainer(webServer.name)
+                    print("~~~~~~~~~~~~~~~~~~~~~ REMOVAL ~~~~~~~~~~~~~~~~~~~~~")
                     logging.info("Web Server " + webServer.name + " has been removed")
+                    print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+
+        print("sumOfAllInvertedScore " + str(sumOfAllInvertedScore))
+        print("highestWeight " + str(highestWeight))
+        print("lowestScoreWebServerName " + str(lowestScoreWebServerName))
+        print("lowestScore " + str(lowestScore))
+        print("numberOfScaleDownFlag " + str(numberOfScaleDownFlag))
+        print("numberOfScaleUpFlag " + str(numberOfScaleUpFlag))
+        print("numberOfCurrentAliveWebServers " + str(numberOfCurrentAliveWebServers))
+        print("sumOfAllScores " + str(sumOfAllScores))
+        print("sumOfAllScores / numberOfCurrentAliveWebServers: " + str(sumOfAllScores / numberOfCurrentAliveWebServers))
+
+        print("########################################################################################################################")
+        print("########################################################################################################################")
+        print("########################################################################################################################")
+
+
 
         # ******* SECTION 3 *******
         # Scaling UP
-        if numberOfScaleUpFlag >= numberOfCurrentAliveWebServers / 2 or (
+        if numberOfScaleUpFlag > (numberOfCurrentAliveWebServers / 2) or (
                 sumOfAllScores / numberOfCurrentAliveWebServers) > ScaleUpAverageThreshold:
             AllWebServersOBJ.append(
                 WebServer(("app" + str(len(AllWebServersOBJ) + 1)), 8010 + len(AllWebServersOBJ) + 1, highestWeight))
@@ -448,7 +486,7 @@ if __name__ == "__main__":
 
         # ******* SECTION 4 *******
         # Scaling Down
-        elif numberOfScaleDownFlag >= numberOfCurrentAliveWebServers / 2:
+        if float(numberOfScaleDownFlag) > float(numberOfCurrentAliveWebServers / 2) and numberOfCurrentAliveWebServers > 1:
             if lowestScoreWebServerName != '':
                 for webserver in AllWebServersOBJ:
                     if webServer.name == lowestScoreWebServerName:
@@ -460,3 +498,104 @@ if __name__ == "__main__":
                         osCommandRunner.executeCommand("service haproxy restart")
                         time.sleep(1)
                         osCommandRunner.executeCommand("service haproxy status | grep Active")
+
+    ###################################################################################################################################################
+    ###################################################################################################################################################
+    ###################################################################################################################################################
+    ###################################################################################################################################################
+    ###################################################################################################################################################
+    ###################################################################################################################################################
+    ###################################################################################################################################################
+    ###################################################################################################################################################
+
+
+
+
+    # # Trigger condition checker for scale condition, OutPut: [y, n, n, y, n ...] for WebServers
+    # cpuTriggerConditionChecker = []
+    # memoryUSageTriggerConditionChecker = []
+    # inputTrafficTriggerConditionChecker = []
+    # outPutTrafficTriggerConditionChecker = []
+    # busyThreadsCountTriggerConditionChecker = []
+    #
+    # # Array of running web servers object
+    # webServers = []
+    # # shouldScale = False
+    #
+    # # Read the log files and create the  webServer object
+    # # for logFile in getLogsFilesName(WebServersLogsFolderPath):
+    # time.sleep(1)
+    #
+    # while not readAllContainerStats:
+    #     arrayOfAllContainerThresholdHintStats = []
+    #     for logFile in range(numberOfWebServers):
+    #         fileReader = FileReader(WebServersLogsFolderPath + "app" + str(logFile + 1))
+    #         temp = []
+    #         # {'Cpu': '0.01', 'Memory': '12.58MiB', 'MemoryUsage': '0.21', 'InputTraffic': '1.82kB', 'OutPutTraffic': '9.1kB', 'BusyThreadsCount': '1'}
+    #         stats = fileReader.readNumberOfLines(6)
+    #         for data in stats:
+    #             temp.append(((data.split())[1]).replace("%", ""))
+    #         # compare the read status with trigger condition array
+    #         if len(temp) > 4:
+    #             if float(temp[0]) > 20:
+    #                 arrayOfAllContainerThresholdHintStats.append("1")
+    #             elif float(temp[0]) < 15:
+    #                 arrayOfAllContainerThresholdHintStats.append("0")
+    #         if len(arrayOfAllContainerThresholdHintStats) == numberOfWebServers:
+    #             readAllContainerStats = True
+    #         else:
+    #             readAllContainerStats = False
+    #
+    # if not checkMajority(arrayOfAllContainerThresholdHintStats, numberOfWebServers) and numberOfWebServers > 1:
+    #     print(
+    #         "########################################################################################################################")
+    #     print(
+    #         "########################################################################################################################")
+    #     dockerUtils.removeCountainer("app" + str(numberOfWebServers))
+    #     logging.info("Web Server " + ("app" + str(numberOfWebServers)) + " has been removed")
+    #     numberOfWebServers = numberOfWebServers - 1
+    #     logging.info("Modify and Restart HaProxy")
+    #     # Edit the haProxy config file and remove the destination
+    #     haproxyConfigModifier.removeTheNewestDestination()
+    #     # Prevent the removal of "\n" at the end of the config file
+    #     haproxyConfigModifier.addNewDestination("\n")
+    #     # Restarting the HaProxy service
+    #     osCommandRunner.executeCommand("service haproxy restart")
+    #     time.sleep(2)
+    #     osCommandRunner.executeCommand("service haproxy status | grep Active")
+    #
+    #
+    # elif checkMajority(arrayOfAllContainerThresholdHintStats, numberOfWebServers):
+    #     numberOfWebServers = numberOfWebServers + 1
+    #     webServerContainre = dockerUtils.createContainer("httpd_final", "app" + str(numberOfWebServers), 1000000000,
+    #                                                      command='', ports={
+    #             # Container Port : Host Port
+    #             '80': 8010 + numberOfWebServers
+    #         })
+    #     logging.info("Web Server " + ("app" + str(numberOfWebServers)) + " has been added")
+    #     logging.info("Modify and Restart HaProxy")
+    #     # Edit the haProxy config file and add the destination
+    #     # Destination string needs to have 4 spaces at the beginning, like below
+    #     #    server web1.example.com  192.168.1.101:80
+    #     haproxyConfigModifier.addNewDestination(
+    #         "    server " + ("app" + str(numberOfWebServers)) + "  " + ServerIpAddress + ':' + str(
+    #             8010 + numberOfWebServers) + "\n")
+    #     # Restarting the HaProxy service
+    #     osCommandRunner.executeCommand("service haproxy restart")
+    #     time.sleep(2)
+    #     osCommandRunner.executeCommand("service haproxy status | grep Active")
+
+# mainWebServerLogReader = FileReader("/Users/amir/Desktop/baka")
+# temp = {}
+# # {'Cpu': '0.01', 'Memory': '12.58MiB', 'MemoryUsage': '0.21', 'InputTraffic': '1.82kB', 'OutPutTraffic': '9.1kB', 'BusyThreadsCount': '1'}
+# for data in mainWebServerLogReader.readNumberOfLines(6):
+#     temp[(data.split())[0]] = ((data.split())[1]).replace("%", "")
+# print(temp)
+
+
+# if len(temp) == 6:
+#     webServers.append(
+#         WebServer(cpu=temp[0], memory=temp[1], memoryUsage=temp[2], inputTraffic=temp[3],
+#                   outPutTraffic=temp[4], busyThreadsCount=temp[5]))
+# else:
+#     logging.error("Web server " + logFile + " status is not correct")
